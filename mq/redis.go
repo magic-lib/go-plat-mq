@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/hibiken/asynq"
-	"github.com/magic-lib/go-omniflow/sasynq"
 	"github.com/magic-lib/go-plat-utils/conn"
 	"github.com/magic-lib/go-plat-utils/conv"
 	"github.com/magic-lib/go-plat-utils/goroutines"
@@ -135,9 +134,9 @@ func (b *RedisMessageQueue) Publish(ctx context.Context, event *Event) (id strin
 
 	task := asynq.NewTask(topicKey, []byte(evString))
 	info, err := b.pushClient.EnqueueContext(ctx, task,
-		sasynq.WithUniqueID(event.Id),
-		sasynq.WithQueue(b.Namespace),
-		sasynq.WithTimeout(b.Timeout),
+		asynq.TaskID(event.Id),
+		asynq.Queue(b.Namespace),
+		asynq.Timeout(b.Timeout),
 	)
 	if err != nil {
 		return "", fmt.Errorf("enqueue task failed: %v", err)
