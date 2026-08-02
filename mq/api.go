@@ -88,6 +88,8 @@ var (
 	_ Consumer  = (*LocalMessageQueue)(nil)
 	_ Publisher = (*RedisMessageQueue)(nil)
 	_ Consumer  = (*RedisMessageQueue)(nil)
+	_ Publisher = (*AsynqMessageQueue)(nil)
+	_ Consumer  = (*AsynqMessageQueue)(nil)
 	_ Publisher = (*KafkaMessageQueue)(nil)
 	_ Consumer  = (*KafkaMessageQueue)(nil)
 )
