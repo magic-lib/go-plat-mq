@@ -88,7 +88,7 @@ func (b *LocalMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 			ctx, cancel := context.WithTimeout(context.Background(), b.timeout)
 			defer cancel()
 
-			if err := handler(ctx, event); err != nil {
+			if _, err := handler(ctx, event); err != nil {
 				fmt.Printf("handler error for topic %s: %s, %v\n", topic, event.Topic, err)
 			}
 		})

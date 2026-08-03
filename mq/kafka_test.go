@@ -119,8 +119,8 @@ func TestKafkaMessageQueue_SubscribeAfterClose(t *testing.T) {
 
 	kq.Close()
 
-	err = kq.Subscribe("test.topic", func(ctx context.Context, event *mq.Event) error {
-		return nil
+	err = kq.Subscribe("test.topic", func(ctx context.Context, event *mq.Event) (any, error) {
+		return nil, nil
 	})
 	if err == nil {
 		t.Fatal("expected error after close, got nil")
@@ -140,8 +140,8 @@ func TestKafkaMessageQueue_DuplicateSubscribe(t *testing.T) {
 	}
 	defer kq.Close()
 
-	handler := func(ctx context.Context, event *mq.Event) error {
-		return nil
+	handler := func(ctx context.Context, event *mq.Event) (any, error) {
+		return nil, nil
 	}
 
 	err = kq.Subscribe("test.dup.topic", handler)
@@ -169,17 +169,17 @@ func TestKafkaMessageQueue_PublishAndSubscribe(t *testing.T) {
 	}
 
 	// 订阅不同 topic
-	err = mq.SubscribeByType[*TestEvent](busQue, "test", func(event *TestEvent) error {
+	err = mq.SubscribeByType[*TestEvent](busQue, "test", func(event *TestEvent) (any, error) {
 		fmt.Println("receive event test:", event)
-		return nil
+		return nil, nil
 	})
 	if err != nil {
 		t.Fatalf("subscribe test error: %v", err)
 	}
 
-	err = mq.SubscribeByType[*TestEvent2](busQue, "test222", func(event *TestEvent2) error {
+	err = mq.SubscribeByType[*TestEvent2](busQue, "test222", func(event *TestEvent2) (any, error) {
 		fmt.Println("receive event test222:", event)
-		return nil
+		return nil, nil
 	})
 	if err != nil {
 		t.Fatalf("subscribe test222 error: %v", err)

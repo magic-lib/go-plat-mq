@@ -307,7 +307,7 @@ func (h *kafkaConsumerGroupHandler) ConsumeClaim(sess sarama.ConsumerGroupSessio
 			sess.MarkMessage(msg, "")
 			continue
 		}
-		if err := h.handler(sess.Context(), &ev); err != nil {
+		if _, err := h.handler(sess.Context(), &ev); err != nil {
 			log.Printf("kafka: handle event failed topic=%s offset=%d err=%v", msg.Topic, msg.Offset, err)
 		} else {
 			sess.MarkMessage(msg, "")

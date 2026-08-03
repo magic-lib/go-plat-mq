@@ -23,19 +23,19 @@ func TestRedisMessageQueue(t *testing.T) {
 	}
 
 	//监听不同的topic
-	err = mq.SubscribeByType[*TestEvent](busQue, "test", func(event *TestEvent) error {
+	err = mq.SubscribeByType[*TestEvent](busQue, "test", func(event *TestEvent) (any, error) {
 		fmt.Println("receive event test:", event)
 		// 如果返回error，则消息会被重新发送
-		return nil
+		return nil, nil
 	})
 
 	if err != nil {
 		fmt.Println("subscribe error:", err)
 	}
 
-	err = mq.SubscribeByType[*TestEvent2](busQue, "test222", func(event *TestEvent2) error {
+	err = mq.SubscribeByType[*TestEvent2](busQue, "test222", func(event *TestEvent2) (any, error) {
 		fmt.Println("receive event test222:", event)
-		return nil
+		return nil, nil
 	})
 	if err != nil {
 		fmt.Println("subscribe222 error:", err)

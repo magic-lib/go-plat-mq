@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/magic-lib/go-plat-utils/conv"
+	"github.com/magic-lib/go-plat-utils/utils"
 	"net/http"
 	"time"
 )
@@ -17,6 +18,11 @@ type Event struct {
 	Headers   http.Header `json:"headers"`   // 用于传递元数据，如 Trace Context
 	Payload   any         `json:"payload"`   // 消息内容
 }
+type Response struct {
+	ErrorMsg string `json:"error_msg"` // 错误信息
+	Event    *Event `json:"event"`
+	Data     any    `json:"data"` // 处理结果内容
+}
 
 // Publisher 定义了消息发布者的接口
 type Publisher interface {
@@ -27,7 +33,7 @@ type Publisher interface {
 }
 
 // ConsumerHandler 是处理消息的函数类型
-type ConsumerHandler func(ctx context.Context, event *Event) error
+type ConsumerHandler utils.ContextTypedHandler[*Event, any]
 
 // Consumer 定义了消息消费者的接口
 type Consumer interface {
@@ -73,11 +79,11 @@ func PublishByType(ctx context.Context, b Publisher, topic string, t any) (strin
 }
 
 // SubscribeByType 实现
-func SubscribeByType[T any](b Consumer, topic string, handler func(t T) error) error {
-	return b.Subscribe(topic, func(ctx context.Context, event *Event) error {
+func SubscribeByType[T any](b Consumer, topic string, handler func(t T) (any, error)) error {
+	return b.Subscribe(topic, func(ctx context.Context, event *Event) (any, error) {
 		data, err := conv.Convert[T](event.Payload)
 		if err != nil {
-			return fmt.Errorf("handler error for topic %s: %s, not type, error: %v", topic, event.Topic, err)
+			return nil, fmt.Errorf("handler error for topic %s: %s, not type, error: %v", topic, event.Topic, err)
 		}
 		return handler(data)
 	})

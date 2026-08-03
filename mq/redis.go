@@ -183,7 +183,8 @@ func (b *RedisMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 			return nil
 		}
 		// 有可能类型不对，值为空值的情况，需要注意
-		return handler(ctx, ev)
+		_, err = handler(ctx, ev)
+		return err
 	})
 	if !isNew {
 		return fmt.Errorf("topic %s sub already start", topic)

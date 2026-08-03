@@ -19,18 +19,18 @@ func TestLocalMessageQueue(t *testing.T) {
 	busQue := mq.NewLocalMessageQueue(0)
 
 	//监听不同的topic
-	err := mq.SubscribeByType[*TestEvent](busQue, "test", func(event *TestEvent) error {
+	err := mq.SubscribeByType[*TestEvent](busQue, "test", func(event *TestEvent) (any, error) {
 		fmt.Println("receive event test:", event)
-		return nil
+		return nil, nil
 	})
 
 	if err != nil {
 		fmt.Println("subscribe error:", err)
 	}
 
-	err = mq.SubscribeByType[*TestEvent2](busQue, "test222", func(event *TestEvent2) error {
+	err = mq.SubscribeByType[*TestEvent2](busQue, "test222", func(event *TestEvent2) (any, error) {
 		fmt.Println("receive event test222:", event)
-		return nil
+		return nil, nil
 	})
 	if err != nil {
 		fmt.Println("subscribe222 error:", err)

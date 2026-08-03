@@ -185,8 +185,26 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 			log.Printf("handler error for topic %s: %s, not type, error: %v", topic, task.Type(), err)
 			return nil
 		}
-		// 有可能类型不对，值为空值的情况，需要注意
-		return handler(ctx, ev)
+		// 执行用户 handler
+		result, handlerErr := handler(ctx, ev)
+
+		resp := new(Response)
+		resp.Event = ev
+		resp.Data = result
+		if handlerErr != nil {
+			resp.ErrorMsg = handlerErr.Error()
+		}
+		// 将执行结果写入 ResultWriter（Call 同步等待需要）
+		if rw := task.ResultWriter(); rw != nil {
+			respString := conv.String(resp)
+			_, _ = rw.Write([]byte(respString))
+		}
+		// 业务错误不重试：用 asynq.SkipRetry 哨兵错误包装，避免 asynq 默认重试（MaxRetry=25）
+		// 业务错误通常是确定性的，重试无意义，且会让 Call 调用方长时间阻塞
+		if handlerErr != nil {
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, handlerErr)
+		}
+		return nil
 	})
 	if !isNew {
 		return fmt.Errorf("topic %s sub already start", topic)
@@ -203,15 +221,15 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 	return nil
 }
 
-// Call 同步提交任务并等待 Consumer 处理完毕，实时返回执行结果
-// 类似 HTTP 请求-响应模式，会阻塞直到任务完成或超时
-func (b *AsynqMessageQueue) Call(ctx context.Context, event *Event) ([]byte, error) {
+// Request 同步提交任务并等待 Consumer 处理完毕，实时返回执行结果
+// 类似 HTTP 请求-响应模式，会阻塞直到任务完成或超时，返回any
+func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (any, error) {
 	taskID, err := b.Publish(ctx, event)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. 使用 Inspector 轮询等待任务完成
+	// 使用 Inspector 轮询等待任务完成
 	inspector := asynq.NewInspector(b.redisOpt)
 	defer func() {
 		_ = inspector.Close()
@@ -231,7 +249,7 @@ func (b *AsynqMessageQueue) Call(ctx context.Context, event *Event) ([]byte, err
 			return nil, ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("submit: wait result timeout for task %s", taskID)
+				return nil, fmt.Errorf("call: wait result timeout for task %s", taskID)
 			}
 
 			taskInfo, err := inspector.GetTaskInfo(b.Namespace, taskID)
@@ -242,11 +260,25 @@ func (b *AsynqMessageQueue) Call(ctx context.Context, event *Event) ([]byte, err
 
 			switch taskInfo.State {
 			case asynq.TaskStateCompleted:
-				return taskInfo.Result, nil
+				resp := &Response{}
+				if len(taskInfo.Result) > 0 {
+					_ = conv.Unmarshal(taskInfo.Result, resp)
+				}
+				if resp.ErrorMsg != "" {
+					return resp, fmt.Errorf("%s", resp.ErrorMsg)
+				}
+				return resp, nil
+			case asynq.TaskStateRetry:
+				resp := &Response{}
+				if len(taskInfo.Result) > 0 {
+					_ = conv.Unmarshal(taskInfo.Result, resp)
+				}
+				if resp.ErrorMsg != "" {
+					return resp, fmt.Errorf("%s", resp.ErrorMsg)
+				}
+				return nil, fmt.Errorf("task retry: %s", string(taskInfo.Result))
 			case asynq.TaskStateArchived:
-				return taskInfo.Result, fmt.Errorf("task archived: %s", string(taskInfo.Result))
-			case asynq.TaskStateAggregating:
-				return taskInfo.Result, fmt.Errorf("task failed: %s", string(taskInfo.Result))
+				return nil, fmt.Errorf("task archived: %s", string(taskInfo.Result))
 			default:
 				continue
 			}
