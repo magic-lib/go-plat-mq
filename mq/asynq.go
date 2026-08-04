@@ -3,8 +3,10 @@ package mq
 import (
 	"context"
 	"fmt"
+	"github.com/magic-lib/go-plat-utils/utils/httputil"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"sync"
 	"time"
@@ -188,11 +190,12 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 		// 执行用户 handler
 		result, handlerErr := handler(ctx, ev)
 
-		resp := new(Response)
-		resp.Event = ev
+		resp := new(httputil.CommResponse)
+		resp.Params = ev
 		resp.Data = result
 		if handlerErr != nil {
-			resp.ErrorMsg = handlerErr.Error()
+			resp.Code = http.StatusInternalServerError
+			resp.Message = handlerErr.Error()
 		}
 		// 将执行结果写入 ResultWriter（Call 同步等待需要）
 		if rw := task.ResultWriter(); rw != nil {
@@ -223,7 +226,7 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 
 // Request 同步提交任务并等待 Consumer 处理完毕，实时返回执行结果
 // 类似 HTTP 请求-响应模式，会阻塞直到任务完成或超时，返回any
-func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (any, error) {
+func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputil.CommResponse, error) {
 	taskID, err := b.Publish(ctx, event)
 	if err != nil {
 		return nil, err
@@ -260,21 +263,21 @@ func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (any, err
 
 			switch taskInfo.State {
 			case asynq.TaskStateCompleted:
-				resp := &Response{}
+				resp := &httputil.CommResponse{}
 				if len(taskInfo.Result) > 0 {
 					_ = conv.Unmarshal(taskInfo.Result, resp)
 				}
-				if resp.ErrorMsg != "" {
-					return resp, fmt.Errorf("%s", resp.ErrorMsg)
+				if resp.Message != "" {
+					return resp, fmt.Errorf("%s", resp.Message)
 				}
 				return resp, nil
 			case asynq.TaskStateRetry:
-				resp := &Response{}
+				resp := &httputil.CommResponse{}
 				if len(taskInfo.Result) > 0 {
 					_ = conv.Unmarshal(taskInfo.Result, resp)
 				}
-				if resp.ErrorMsg != "" {
-					return resp, fmt.Errorf("%s", resp.ErrorMsg)
+				if resp.Message != "" {
+					return resp, fmt.Errorf("%s", resp.Message)
 				}
 				return nil, fmt.Errorf("task retry: %s", string(taskInfo.Result))
 			case asynq.TaskStateArchived:

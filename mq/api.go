@@ -18,11 +18,6 @@ type Event struct {
 	Headers   http.Header `json:"headers"`   // 用于传递元数据，如 Trace Context
 	Payload   any         `json:"payload"`   // 消息内容
 }
-type Response struct {
-	ErrorMsg string `json:"error_msg"` // 错误信息
-	Event    *Event `json:"event"`
-	Data     any    `json:"data"` // 处理结果内容
-}
 
 // Publisher 定义了消息发布者的接口
 type Publisher interface {
