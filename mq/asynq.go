@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/magic-lib/go-plat-utils/utils/httputil"
+	"github.com/redis/go-redis/v9"
 	"log"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ type AsynqMessageQueue struct {
 	ServerConfig *asynq.Config // 消费端配置
 
 	redisOpt         *asynq.RedisClientOpt
+	redisClient      *redis.Client // 用于 Pub/Sub 实时推送结果（跨进程/分布式可用）
 	pushClient       *asynq.Client
 	subServer        *asynq.Server
 	serverStarted    bool
@@ -33,6 +35,11 @@ type AsynqMessageQueue struct {
 	topicMu          sync.Mutex
 	mu               sync.RWMutex
 	closed           bool
+}
+
+// resultChannel 返回某个任务结果推送的 Redis channel 名
+func (b *AsynqMessageQueue) resultChannel(taskID string) string {
+	return fmt.Sprintf("mq:result:%s:%s", b.Namespace, taskID)
 }
 
 // NewAsynqMessageQueue 创建新的 AsynqMessageQueue 实例
@@ -62,6 +69,13 @@ func NewAsynqMessageQueue(cfg *conn.Connect, mqConf *AsynqMessageQueue) (*AsynqM
 	}
 	mqConf.pushClient = client
 	mqConf.redisOpt = &redisOpt
+	// Pub/Sub 需要独立的连接（subscribe 会占用连接，不能与命令复用同一连接池的常见模式冲突）
+	mqConf.redisClient = redis.NewClient(&redis.Options{
+		Addr:     net.JoinHostPort(cfg.Host, cfg.Port),
+		Username: cfg.Username,
+		Password: cfg.Password,
+		DB:       db,
+	})
 	if mqConf.Timeout <= 0 {
 		mqConf.Timeout = defaultTimeout
 	}
@@ -160,6 +174,9 @@ func (b *AsynqMessageQueue) Close() {
 
 	b.closed = true
 	_ = b.pushClient.Close()
+	if b.redisClient != nil {
+		_ = b.redisClient.Close()
+	}
 	if b.subServer != nil {
 		b.subServer.Shutdown()
 	}
@@ -201,11 +218,20 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 		if rw := task.ResultWriter(); rw != nil {
 			respString := conv.String(resp)
 			_, _ = rw.Write([]byte(respString))
+
+			// 通过 Redis Pub/Sub 实时推送结果，唤醒等待中的 Request（支持分布式）
+			if b.redisClient != nil {
+				if pubErr := b.redisClient.Publish(ctx, b.resultChannel(ev.Id), respString).Err(); pubErr != nil {
+					log.Printf("publish result to redis pub/sub failed for task %s: %v", ev.Id, pubErr)
+				}
+			}
 		}
 		// 业务错误不重试：用 asynq.SkipRetry 哨兵错误包装，避免 asynq 默认重试（MaxRetry=25）
 		// 业务错误通常是确定性的，重试无意义，且会让 Call 调用方长时间阻塞
 		if handlerErr != nil {
-			return fmt.Errorf("%w: %v", asynq.SkipRetry, handlerErr)
+			//return fmt.Errorf("%w: %v", asynq.SkipRetry, handlerErr)
+			log.Printf("%w: %v", asynq.SkipRetry, handlerErr)
+			return nil
 		}
 		return nil
 	})
@@ -226,27 +252,103 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 
 // Request 同步提交任务并等待 Consumer 处理完毕，实时返回执行结果
 // 类似 HTTP 请求-响应模式，会阻塞直到任务完成或超时，返回any
+// 实现方式：Redis Pub/Sub 推模型（支持分布式）+ Inspector 兜底查询（解决订阅前完成的时间窗口）
 func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputil.CommResponse, error) {
 	taskID, err := b.Publish(ctx, event)
 	if err != nil {
 		return nil, err
 	}
 
-	// 使用 Inspector 轮询等待任务完成
+	// 1. 订阅结果 channel（必须在 Publish 之后、任何等待之前立即订阅）
+	pubsub := b.redisClient.Subscribe(ctx, b.resultChannel(taskID))
+	defer func() {
+		_ = pubsub.Close()
+	}()
+	resultCh := pubsub.Channel()
+
+	// 2. 兜底：订阅后立刻用 Inspector 查一次，覆盖「Consumer 在订阅前已完成」的极小窗口
 	inspector := asynq.NewInspector(b.redisOpt)
 	defer func() {
 		_ = inspector.Close()
 	}()
+	if resp, done, derr := b.checkTaskResult(inspector, taskID); done {
+		return resp, derr
+	}
 
-	ticker := time.NewTicker(50 * time.Millisecond) // 轮询间隔
-	defer ticker.Stop()
-
+	// 3. 等待：要么从 Pub/Sub 收到实时推送，要么超时/取消
 	deadline := time.Now().Add(b.Timeout)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
 
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+			return nil, fmt.Errorf("call: wait result timeout for task %s", taskID)
+		case msg, ok := <-resultCh:
+			// Consumer 完成并通过 Pub/Sub 推送了结果，零延迟返回
+			if !ok {
+				// Pub/Sub 连接异常关闭，退化为 Inspector 轮询兜底
+				return b.waitByInspector(inspector, ctx, taskID, deadline)
+			}
+			resp := &httputil.CommResponse{}
+			if len(msg.Payload) > 0 {
+				_ = conv.Unmarshal([]byte(msg.Payload), resp)
+			}
+			if resp.Message != "" {
+				return resp, fmt.Errorf("%s", resp.Message)
+			}
+			return resp, nil
+		}
+	}
+}
+
+// checkTaskResult 用 Inspector 查一次任务结果，done=true 表示已终态可返回
+func (b *AsynqMessageQueue) checkTaskResult(inspector *asynq.Inspector, taskID string) (*httputil.CommResponse, bool, error) {
+	taskInfo, err := inspector.GetTaskInfo(b.Namespace, taskID)
+	if err != nil {
+		// 任务尚未落库（仍在队列中未开始处理），属于正常情况，继续等待 Pub/Sub
+		return nil, false, nil
+	}
+	switch taskInfo.State {
+	case asynq.TaskStateCompleted:
+		resp := &httputil.CommResponse{}
+		if len(taskInfo.Result) > 0 {
+			_ = conv.Unmarshal(taskInfo.Result, resp)
+		}
+		if resp.Message != "" {
+			return resp, true, fmt.Errorf("%s", resp.Message)
+		}
+		return resp, true, nil
+	case asynq.TaskStateRetry:
+		resp := &httputil.CommResponse{}
+		if len(taskInfo.Result) > 0 {
+			_ = conv.Unmarshal(taskInfo.Result, resp)
+		}
+		if resp.Message != "" {
+			return resp, true, fmt.Errorf("%s", resp.Message)
+		}
+		return nil, true, fmt.Errorf("task retry: %s", string(taskInfo.Result))
+	case asynq.TaskStateArchived:
+		return nil, true, fmt.Errorf("task archived: %s", string(taskInfo.Result))
+	default:
+		// 其他状态（active/pending/scheduled）继续等待 Pub/Sub 推送
+		return nil, false, nil
+	}
+}
+
+// waitByInspector Pub/Sub 失效时的兜底轮询，保证可靠性
+func (b *AsynqMessageQueue) waitByInspector(inspector *asynq.Inspector, ctx context.Context, taskID string, deadline time.Time) (*httputil.CommResponse, error) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if resp, done, derr := b.checkTaskResult(inspector, taskID); done {
+			return resp, derr
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -254,38 +356,6 @@ func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputi
 			if time.Now().After(deadline) {
 				return nil, fmt.Errorf("call: wait result timeout for task %s", taskID)
 			}
-
-			taskInfo, err := inspector.GetTaskInfo(b.Namespace, taskID)
-			if err != nil {
-				// 任务可能还在队列中未开始处理，这是正常的，继续等待
-				continue
-			}
-
-			switch taskInfo.State {
-			case asynq.TaskStateCompleted:
-				resp := &httputil.CommResponse{}
-				if len(taskInfo.Result) > 0 {
-					_ = conv.Unmarshal(taskInfo.Result, resp)
-				}
-				if resp.Message != "" {
-					return resp, fmt.Errorf("%s", resp.Message)
-				}
-				return resp, nil
-			case asynq.TaskStateRetry:
-				resp := &httputil.CommResponse{}
-				if len(taskInfo.Result) > 0 {
-					_ = conv.Unmarshal(taskInfo.Result, resp)
-				}
-				if resp.Message != "" {
-					return resp, fmt.Errorf("%s", resp.Message)
-				}
-				return nil, fmt.Errorf("task retry: %s", string(taskInfo.Result))
-			case asynq.TaskStateArchived:
-				return nil, fmt.Errorf("task archived: %s", string(taskInfo.Result))
-			default:
-				continue
-			}
-			// 其他状态（active/pending/scheduled/retry）继续等待
 		}
 	}
 }

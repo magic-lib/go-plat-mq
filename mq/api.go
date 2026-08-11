@@ -12,7 +12,7 @@ import (
 
 // Event 代表一个通用的消息事件
 type Event struct {
-	Id        string      `json:"id"`        // 消息ID
+	Id        string      `json:"id"`        // 消息ID，必须唯一，避免并发读取，冲突
 	Topic     string      `json:"topic"`     // 消息主题
 	Timestamp int64       `json:"timestamp"` // 消息创建时间戳，秒级
 	Headers   http.Header `json:"headers"`   // 用于传递元数据，如 Trace Context
