@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/magic-lib/go-plat-utils/utils/httputil"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/redis/go-redis/v9"
 	"log"
 	"net"
@@ -30,8 +31,8 @@ type AsynqMessageQueue struct {
 	subServer        *asynq.Server
 	serverStarted    bool
 	mainMux          *asynq.ServeMux
-	subscribedTopics map[string]bool
-	pushTypeTopics   map[string]reflect.Type
+	subscribedTopics cmap.ConcurrentMap[string, bool]
+	pushTypeTopics   cmap.ConcurrentMap[string, reflect.Type]
 	topicMu          sync.Mutex
 	mu               sync.RWMutex
 	closed           bool
@@ -98,8 +99,8 @@ func NewAsynqMessageQueue(cfg *conn.Connect, mqConf *AsynqMessageQueue) (*AsynqM
 		mqConf.ServerConfig.Queues[mqConf.Namespace] = workerNum
 	}
 
-	mqConf.pushTypeTopics = make(map[string]reflect.Type)
-	mqConf.subscribedTopics = make(map[string]bool)
+	mqConf.pushTypeTopics = cmap.New[reflect.Type]()
+	mqConf.subscribedTopics = cmap.New[bool]()
 	mqConf.mainMux = asynq.NewServeMux()
 
 	return mqConf, client.Ping()
@@ -115,11 +116,11 @@ func (b *AsynqMessageQueue) handleTopic(topic string, handleTask func(context.Co
 
 	topicKey := b.getTopicKey(topic)
 
-	if _, exists := b.subscribedTopics[topicKey]; exists {
+	if exists := b.subscribedTopics.Has(topicKey); exists {
 		return false
 	}
 
-	b.subscribedTopics[topicKey] = true
+	b.subscribedTopics.Set(topicKey, true)
 
 	b.mainMux.HandleFunc(topicKey, handleTask)
 
@@ -141,13 +142,13 @@ func (b *AsynqMessageQueue) Publish(ctx context.Context, event *Event) (id strin
 
 	topicKey := b.getTopicKey(event.Topic)
 
-	if oneType, ok := b.pushTypeTopics[topicKey]; ok {
+	if oneType, ok := b.pushTypeTopics.Get(topicKey); ok {
 		currType := reflect.TypeOf(ev.Payload)
 		if currType.String() != oneType.String() {
 			log.Printf("error: push type error %s: %s, not type: %s, %s, value: %v \n", topicKey, ev.Topic, oneType.String(), currType.String(), ev.Payload)
 		}
 	} else {
-		b.pushTypeTopics[topicKey] = reflect.TypeOf(ev.Payload)
+		b.pushTypeTopics.Set(topicKey, reflect.TypeOf(ev.Payload))
 	}
 
 	task := asynq.NewTask(topicKey, []byte(evString))
