@@ -333,7 +333,7 @@ func (b *AsynqMessageQueue) checkTaskResult(inspector *asynq.Inspector, taskID s
 		if resp.Message != "" {
 			return resp, true, fmt.Errorf("%s", resp.Message)
 		}
-		return nil, true, fmt.Errorf("task retry: %s", string(taskInfo.Result))
+		return nil, true, fmt.Errorf("task retry: %s", taskInfo.LastErr)
 	case asynq.TaskStateArchived:
 		return nil, true, fmt.Errorf("task archived: %s", string(taskInfo.Result))
 	default:

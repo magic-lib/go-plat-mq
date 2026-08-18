@@ -132,8 +132,8 @@ github.com/leonklingele/passphrase v0.0.0-20250510225810-8392a5b34c3f h1:HV39CUs
 github.com/leonklingele/passphrase v0.0.0-20250510225810-8392a5b34c3f/go.mod h1:Ksq8T14zOxap970oztefUoSwvvm1eMYcWoFLEBgFLjk=
 github.com/lithammer/shortuuid/v3 v3.0.7 h1:trX0KTHy4Pbwo/6ia8fscyHoGA+mf1jWbPJVuvyJQQ8=
 github.com/lithammer/shortuuid/v3 v3.0.7/go.mod h1:vMk8ke37EmiewwolSO1NLW8vP4ZaKlRuDIi8tWWmAts=
-github.com/magic-lib/go-plat-utils v1.20260210.2-0.20260813063204-b45e4277a265 h1:QbcfTiO+z0SKMAWkOejSBQq1kWUrPtDkNulY8HmrUKQ=
-github.com/magic-lib/go-plat-utils v1.20260210.2-0.20260813063204-b45e4277a265/go.mod h1:ngCJUrkN0+YlmZqTId7fZomOQTXmCJmUGuObDEuTSGY=
+github.com/magic-lib/go-plat-utils v1.20260210.2-0.20260818103136-e724e747dd96 h1:I9avp/xKM5etZ96xFjYxbZ7tMTyxdy8Edaylq3ccUX4=
+github.com/magic-lib/go-plat-utils v1.20260210.2-0.20260818103136-e724e747dd96/go.mod h1:ngCJUrkN0+YlmZqTId7fZomOQTXmCJmUGuObDEuTSGY=
 github.com/marspere/goencrypt v1.0.7 h1:Rlvsc9b7Yeaeda+gsGeCjREVZ/KL7szelRq4+haK5mw=
 github.com/marspere/goencrypt v1.0.7/go.mod h1:S5g6Wsd5jcOO01sp9QxNMYCldx9kecoDkK7BWaHA0vo=
 github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=
