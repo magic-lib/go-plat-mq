@@ -289,7 +289,7 @@ func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputi
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-timer.C:
-			return nil, fmt.Errorf("call: wait result timeout for task %s", taskID)
+			return nil, fmt.Errorf("call: wait result timeout for task %s, timeout: %d", taskID, b.Timeout.Seconds())
 		case msg, ok := <-resultCh:
 			// Consumer 完成并通过 Pub/Sub 推送了结果，零延迟返回
 			if !ok {
@@ -355,7 +355,7 @@ func (b *AsynqMessageQueue) waitByInspector(inspector *asynq.Inspector, ctx cont
 			return nil, ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("call: wait result timeout for task %s", taskID)
+				return nil, fmt.Errorf("call: wait result timeout for task %s, dealline: %d", taskID, deadline.Unix())
 			}
 		}
 	}
