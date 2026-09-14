@@ -3,6 +3,7 @@ package mq
 import (
 	"context"
 	"fmt"
+	"github.com/google/uuid"
 	"github.com/magic-lib/go-plat-utils/utils/httputil"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/redis/go-redis/v9"
@@ -255,17 +256,26 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 // 类似 HTTP 请求-响应模式，会阻塞直到任务完成或超时，返回any
 // 实现方式：Redis Pub/Sub 推模型（支持分布式）+ Inspector 兜底查询（解决订阅前完成的时间窗口）
 func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputil.CommResponse, error) {
+	if event == nil {
+		return nil, fmt.Errorf("event is empty")
+	}
+
+	if event.Id == "" {
+		event.Id = uuid.NewString()
+	}
+
+	// 1. 订阅结果 channel（必须在 Publish 之后、任何等待之前立即订阅）
+	pubSub := b.redisClient.Subscribe(ctx, b.resultChannel(event.Id))
+	defer func() {
+		_ = pubSub.Close()
+	}()
+
 	taskID, err := b.Publish(ctx, event)
 	if err != nil {
 		return nil, err
 	}
 
-	// 1. 订阅结果 channel（必须在 Publish 之后、任何等待之前立即订阅）
-	pubsub := b.redisClient.Subscribe(ctx, b.resultChannel(taskID))
-	defer func() {
-		_ = pubsub.Close()
-	}()
-	resultCh := pubsub.Channel()
+	resultCh := pubSub.Channel()
 
 	// 2. 兜底：订阅后立刻用 Inspector 查一次，覆盖「Consumer 在订阅前已完成」的极小窗口
 	inspector := asynq.NewInspector(b.redisOpt)
