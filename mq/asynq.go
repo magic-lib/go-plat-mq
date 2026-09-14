@@ -272,8 +272,8 @@ func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputi
 	defer func() {
 		_ = inspector.Close()
 	}()
-	if resp, done, derr := b.checkTaskResult(inspector, taskID); done {
-		return resp, derr
+	if resp, done, dErr := b.checkTaskResult(inspector, taskID); done {
+		return resp, dErr
 	}
 
 	// 3. 等待：要么从 Pub/Sub 收到实时推送，要么超时/取消
