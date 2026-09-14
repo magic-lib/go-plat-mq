@@ -232,7 +232,7 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 		// 业务错误通常是确定性的，重试无意义，且会让 Call 调用方长时间阻塞
 		if handlerErr != nil {
 			//return fmt.Errorf("%w: %v", asynq.SkipRetry, handlerErr)
-			log.Printf("%w: %v", asynq.SkipRetry, handlerErr)
+			log.Printf("%s: %v", asynq.SkipRetry.Error(), handlerErr)
 			return nil
 		}
 		return nil
@@ -299,7 +299,7 @@ func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputi
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-timer.C:
-			return nil, fmt.Errorf("call: wait result timeout for task %s, timeout: %d", taskID, b.Timeout.Seconds())
+			return nil, fmt.Errorf("call: wait result timeout for task %s, timeout: %s", taskID, b.Timeout.String())
 		case msg, ok := <-resultCh:
 			// Consumer 完成并通过 Pub/Sub 推送了结果，零延迟返回
 			if !ok {
