@@ -21,6 +21,9 @@ import (
 	"github.com/magic-lib/go-plat-utils/goroutines"
 )
 
+// startDelay server 启动/重启的防抖延时：合并连续多次 Subscribe，避免重复重建 server
+const startDelay = 200 * time.Millisecond
+
 // AsynqMessageQueue 基于 asynq（Redis 后端）实现的消息队列
 type AsynqMessageQueue struct {
 	Namespace    string
@@ -221,25 +224,20 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 	topicKey := b.getTopicKey(topic)
 	// 每个 topic 独立队列：任务只会出现在「注册了该 topic 的 worker」所监听的队列中，
 	// 从根本上避免「共享命名空间队列时，未注册 topic 的任务被其它 worker 抢到 → handler not found」的间歇故障。
+	// 语义：注册了同一 topic 的多个 worker 共同消费该队列（asynq 原子出队，谁先抢到谁消费）；
+	//       没注册该 topic 的 worker 根本不监听该队列，因此永远抢不到。
 	if _, ok := b.ServerConfig.Queues[topicKey]; !ok {
 		b.ServerConfig.Queues[topicKey] = 1
 	}
 	// 兜底：若调用方未在全部 Subscribe 完成后显式调用 Start()（例如单测、单 topic 场景），
 	// 则在短暂延迟后自动启动 server，此时所有同步注册的 topic 队列均已就绪。
 	// 注意：RegisterActivities 会在循环结束后显式调用 Start()，会立即启动并取消此 timer。
-	if !b.serverStarted {
-		if b.startTimer != nil {
-			b.startTimer.Stop()
-		}
-		b.startTimer = time.AfterFunc(200*time.Millisecond, func() {
-			if err := b.Start(); err != nil {
-				log.Println("asynq auto-start server error:", err)
-			}
-		})
-	}
+	// asynq.Server 在 NewServer 时拷贝了队列配置，运行中新增的 topic 队列不会自动生效，
+	// 因此这里统一用 timer 防抖后（重新）启动，兼容「先 Start 再动态 Subscribe」的场景。
+	b.scheduleStart()
 	isNew := b.handleTopic(topic, func(ctx context.Context, task *asynq.Task) error {
 		// 格式错误，直接返回nil，不用重试
-		topicKey := b.getTopicKey(topic)
+		topicKey = b.getTopicKey(topic)
 		if task.Type() != topicKey {
 			log.Printf("handler error for topic %s: %s, not type", topicKey, task.Type())
 			return nil
@@ -284,6 +282,25 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 		return fmt.Errorf("topic %s sub already start", topic)
 	}
 	return nil
+}
+
+// scheduleStart 防抖调度 server 的启动/重启（调用方需持有 b.mu）。
+//
+// asynq.Server 在 NewServer 时就把队列配置拷贝进了内部状态，之后往 ServerConfig.Queues
+// 里加 key 对运行中的 server 无效。为了让「先 Start、后动态 Subscribe」也能消费新 topic，
+// 这里用一个短延时 timer 合并连续多次 Subscribe，只重启一次。
+func (b *AsynqMessageQueue) scheduleStart() {
+	if b.startTimer != nil {
+		b.startTimer.Stop()
+	}
+	b.startTimer = time.AfterFunc(startDelay, func() {
+		b.mu.Lock()
+		b.startTimer = nil
+		b.mu.Unlock()
+		if err := b.Start(); err != nil {
+			log.Println("asynq auto-start server error:", err)
+		}
+	})
 }
 
 // Start 启动消费端 server，消费所有已通过 Subscribe 注册的 topic 队列。
@@ -456,12 +473,13 @@ func (b *AsynqMessageQueue) Request(ctx context.Context, event *Event) (*httputi
 		return nil, err
 	}
 
-	// 3. 等待结果
-	return b.waitResult(ctx, taskID, resultCh)
+	// 3. 等待结果。队列粒度是 topicKey（={namespace}:{topic}），轮询兜底必须按同一队列名查询
+	return b.waitResult(ctx, taskID, b.getTopicKey(event.Topic), resultCh)
 }
 
 // waitResult Pub/Sub 实时推送（快路径）+ Inspector 周期轮询（正确性兜底）
-func (b *AsynqMessageQueue) waitResult(ctx context.Context, taskID string, resultCh <-chan string) (*httputil.CommResponse, error) {
+// queueName 为任务所在队列名（topicKey）；inspector.GetTaskInfo 是单队列查找，传错队列会导致兜底静默失效
+func (b *AsynqMessageQueue) waitResult(ctx context.Context, taskID, queueName string, resultCh <-chan string) (*httputil.CommResponse, error) {
 	inspector := b.getInspector()
 
 	deadline := time.Now().Add(b.Timeout)
@@ -476,7 +494,7 @@ func (b *AsynqMessageQueue) waitResult(ctx context.Context, taskID string, resul
 	for {
 		// 每轮主动查一次：覆盖「结果早于订阅生效已发布」与「Pub/Sub 消息丢失」两种情况
 		if inspector != nil {
-			if resp, done, err := b.checkTaskResult(inspector, taskID); done {
+			if resp, done, err := b.checkTaskResult(inspector, queueName, taskID); done {
 				return resp, err
 			}
 		}
@@ -531,8 +549,10 @@ func (b *AsynqMessageQueue) getInspector() *asynq.Inspector {
 }
 
 // checkTaskResult 用 Inspector 查一次任务结果，done=true 表示已终态可返回
-func (b *AsynqMessageQueue) checkTaskResult(inspector *asynq.Inspector, taskID string) (*httputil.CommResponse, bool, error) {
-	taskInfo, err := inspector.GetTaskInfo(b.Namespace, taskID)
+func (b *AsynqMessageQueue) checkTaskResult(inspector *asynq.Inspector, queueName, taskID string) (*httputil.CommResponse, bool, error) {
+	// 注意：GetTaskInfo 是单队列查找，queueName 必须与 Publish 时的 asynq.Queue 一致（即 topicKey），
+	// 否则恒返回 not found，轮询兜底会静默失效
+	taskInfo, err := inspector.GetTaskInfo(queueName, taskID)
 	if err != nil {
 		// 任务尚未落库（仍在队列中未开始处理），属于正常情况，继续等待 Pub/Sub
 		return nil, false, nil
