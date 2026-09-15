@@ -34,6 +34,7 @@ type AsynqMessageQueue struct {
 	pushClient       *asynq.Client
 	subServer        *asynq.Server
 	serverStarted    bool
+	startTimer       *time.Timer // 兜底延迟启动 timer：未在 Subscribe 后显式 Start 时触发
 	mainMux          *asynq.ServeMux
 	subscribedTopics cmap.ConcurrentMap[string, bool]
 	pushTypeTopics   cmap.ConcurrentMap[string, reflect.Type]
@@ -107,17 +108,12 @@ func NewAsynqMessageQueue(cfg *conn.Connect, mqConf *AsynqMessageQueue) (*AsynqM
 	if mqConf.ServerConfig == nil {
 		mqConf.ServerConfig = &asynq.Config{
 			Concurrency: defaultWorkerNum,
-			Queues: map[string]int{
-				mqConf.Namespace: defaultWorkerNum,
-			},
+			Queues:      map[string]int{},
 		}
 	}
 
 	if mqConf.ServerConfig.Queues == nil {
 		mqConf.ServerConfig.Queues = make(map[string]int)
-	}
-	if _, exists := mqConf.ServerConfig.Queues[mqConf.Namespace]; !exists {
-		mqConf.ServerConfig.Queues[mqConf.Namespace] = defaultWorkerNum
 	}
 
 	mqConf.pushTypeTopics = cmap.New[reflect.Type]()
@@ -176,7 +172,7 @@ func (b *AsynqMessageQueue) Publish(ctx context.Context, event *Event) (id strin
 	task := asynq.NewTask(topicKey, []byte(evString))
 	info, err := b.pushClient.EnqueueContext(ctx, task,
 		asynq.TaskID(event.Id),
-		asynq.Queue(b.Namespace),
+		asynq.Queue(topicKey),
 		asynq.Timeout(b.Timeout),
 		asynq.Retention(b.Timeout),
 	)
@@ -208,17 +204,38 @@ func (b *AsynqMessageQueue) Close() {
 	if b.subServer != nil {
 		b.subServer.Shutdown()
 	}
+	if b.startTimer != nil {
+		b.startTimer.Stop()
+		b.startTimer = nil
+	}
 }
 
 // Subscribe 实现 Consumer 接口
+// 仅注册 handler 与对应 topic 队列，不启动 server；server 需在所有 Subscribe 调用完成后由 Start() 启动。
 func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
 		return fmt.Errorf("bus is closed")
 	}
-	if b.subServer == nil {
-		b.subServer = asynq.NewServer(b.redisOpt, *b.ServerConfig)
+	topicKey := b.getTopicKey(topic)
+	// 每个 topic 独立队列：任务只会出现在「注册了该 topic 的 worker」所监听的队列中，
+	// 从根本上避免「共享命名空间队列时，未注册 topic 的任务被其它 worker 抢到 → handler not found」的间歇故障。
+	if _, ok := b.ServerConfig.Queues[topicKey]; !ok {
+		b.ServerConfig.Queues[topicKey] = 1
+	}
+	// 兜底：若调用方未在全部 Subscribe 完成后显式调用 Start()（例如单测、单 topic 场景），
+	// 则在短暂延迟后自动启动 server，此时所有同步注册的 topic 队列均已就绪。
+	// 注意：RegisterActivities 会在循环结束后显式调用 Start()，会立即启动并取消此 timer。
+	if !b.serverStarted {
+		if b.startTimer != nil {
+			b.startTimer.Stop()
+		}
+		b.startTimer = time.AfterFunc(200*time.Millisecond, func() {
+			if err := b.Start(); err != nil {
+				log.Println("asynq auto-start server error:", err)
+			}
+		})
 	}
 	isNew := b.handleTopic(topic, func(ctx context.Context, task *asynq.Task) error {
 		// 格式错误，直接返回nil，不用重试
@@ -266,15 +283,35 @@ func (b *AsynqMessageQueue) Subscribe(topic string, handler ConsumerHandler) err
 	if !isNew {
 		return fmt.Errorf("topic %s sub already start", topic)
 	}
+	return nil
+}
 
-	if !b.serverStarted {
-		b.serverStarted = true
-		goroutines.GoAsync(func(params ...any) {
-			if err := b.subServer.Start(b.mainMux); err != nil {
-				log.Println("start asynq server error:", err)
-			}
-		})
+// Start 启动消费端 server，消费所有已通过 Subscribe 注册的 topic 队列。
+// 必须在完成全部 Subscribe 调用之后调用一次；可重复调用（会用当前队列集合重建 server，
+// 以支持注册完成后再动态新增 topic 的场景）。
+func (b *AsynqMessageQueue) Start() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.startTimer != nil {
+		b.startTimer.Stop()
+		b.startTimer = nil
 	}
+	if b.closed {
+		return fmt.Errorf("bus is closed")
+	}
+	if len(b.ServerConfig.Queues) == 0 {
+		return fmt.Errorf("no queue subscribed, call Subscribe before Start")
+	}
+	if b.subServer != nil {
+		b.subServer.Shutdown()
+	}
+	b.subServer = asynq.NewServer(b.redisOpt, *b.ServerConfig)
+	b.serverStarted = true
+	goroutines.GoAsync(func(params ...any) {
+		if err := b.subServer.Start(b.mainMux); err != nil {
+			log.Println("start asynq server error:", err)
+		}
+	})
 	return nil
 }
 
