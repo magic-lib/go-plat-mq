@@ -7,6 +7,7 @@ import (
 	"github.com/magic-lib/go-plat-utils/conn"
 	"github.com/magic-lib/go-plat-utils/conv"
 	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -147,8 +148,9 @@ func TestAsynqCall_HandlerError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error from Call, got nil")
-	} else {
-		t.Fatal("expected error from Call, got err", err.Error())
+	}
+	if !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected error %q from Call, got %q", expectedErr, err)
 	}
 	t.Logf("Call error result: %+v, err: %v", result, err)
 }
@@ -210,6 +212,72 @@ func TestAsynqCall_Timeout(t *testing.T) {
 		t.Fatal("expected timeout error, got nil")
 	}
 	t.Logf("Call timeout error: %v", err)
+}
+
+// TestAsynqCall_FastTaskNoLostResult 回归测试：快任务场景下结果既不丢失、也不串号。
+//
+// 历史 bug：worker 可能在调用方订阅生效前就 publish 结果 → Pub/Sub 消息丢失 → 空等到超时。
+// 修复：主循环持续用 Inspector 轮询兜底，保证任何情况下都能拿到结果。
+//
+// 说明：asynq 的 forwarder/poller 默认 pollInterval=1s，任务从 pending 搬到 active 有约 1s 固有开销，
+// 这与 Pub/Sub 改造无关；故采用并发而非串行循环，避免测试耗时随次数线性增长。
+func TestAsynqCall_FastTaskNoLostResult(t *testing.T) {
+	busQue, err := mq.NewAsynqMessageQueue(&conn.Connect{
+		Host: "127.0.0.1",
+		Port: "6379",
+	}, &mq.AsynqMessageQueue{
+		Namespace: "demo-race",
+		Timeout:   10 * time.Second,
+	})
+	if err != nil {
+		t.Skipf("redis not available, skip: %v", err)
+	}
+	defer busQue.Close()
+
+	// handler 立即返回，制造「结果早于订阅生效」的竞态窗口
+	err = mq.SubscribeByType[*TestEvent](busQue, "call.fast", func(event *TestEvent) (any, error) {
+		return event.Name, nil // 回显 Name，供调用方校验结果一一对应
+	})
+	if err != nil {
+		t.Fatalf("subscribe error: %v", err)
+	}
+
+	const (
+		workers = 20
+		loops   = 10
+	)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(wid int) {
+			defer wg.Done()
+			for i := 0; i < loops; i++ {
+				name := fmt.Sprintf("w%d-i%d", wid, i)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				result, callErr := busQue.Request(ctx, &mq.Event{
+					Topic:   "call.fast",
+					Payload: &TestEvent{Name: name},
+				})
+				cancel()
+				if callErr != nil {
+					t.Errorf("worker %d loop %d: unexpected error (result lost): %v", wid, i, callErr)
+					return
+				}
+				if result == nil {
+					t.Errorf("worker %d loop %d: result is nil", wid, i)
+					return
+				}
+				// 结果与请求必须一一对应，不能串到别的任务上
+				if got := conv.String(result.Data); got != name {
+					t.Errorf("worker %d loop %d: result mismatch, got %q, want %q", wid, i, got, name)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	t.Logf("%d concurrent fast Requests all succeeded in %v", workers*loops, time.Since(start))
 }
 
 // TestAsynqCall_Concurrent 测试并发 Call：多个 goroutine 同时同步调用
