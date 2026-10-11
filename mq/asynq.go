@@ -24,6 +24,12 @@ import (
 // startDelay server 启动/重启的防抖延时：合并连续多次 Subscribe，避免重复重建 server
 const startDelay = 200 * time.Millisecond
 
+// defaultTaskCheckInterval worker 空闲时轮询 Redis 取任务的间隔。
+// asynq v0.26.0 队列空时 sleep(taskCheckInterval/2 + jitter)（见 processor.go），默认 1s
+// 调小到 100ms 后空闲平均睡 ~50ms，端到端取结果 p50 降到 ~100ms；
+// 代价是给 Redis 增加轻量轮询压力（空闲 worker 约每 100ms 一次），少量 worker 可忽略。
+const defaultTaskCheckInterval = 100 * time.Millisecond
+
 // AsynqMessageQueue 基于 asynq（Redis 后端）实现的消息队列
 type AsynqMessageQueue struct {
 	Namespace    string
@@ -110,8 +116,9 @@ func NewAsynqMessageQueue(cfg *conn.Connect, mqConf *AsynqMessageQueue) (*AsynqM
 	}
 	if mqConf.ServerConfig == nil {
 		mqConf.ServerConfig = &asynq.Config{
-			Concurrency: defaultWorkerNum,
-			Queues:      map[string]int{},
+			Concurrency:       defaultWorkerNum,
+			Queues:            map[string]int{},
+			TaskCheckInterval: defaultTaskCheckInterval,
 		}
 	}
 
